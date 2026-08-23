@@ -117,6 +117,20 @@ export default function IncidentDossier({ alert, onTriggerAction, onOverrideSucc
 
       {/* Dossier Content */}
       <div className="p-6 space-y-6 flex-1 overflow-y-auto">
+        {/* Override Status Banner if active */}
+        {alert.overridden && (
+          <div className="bg-emerald-950/40 border border-emerald-800/80 rounded-xl p-3.5 flex items-start space-x-3 text-emerald-200 text-xs">
+            <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <div className="font-bold text-emerald-300">Graceful Failure Handling Active — Merchant Override Logged</div>
+              <p className="text-emerald-400/90 leading-relaxed">
+                This incident was reviewed and marked as a false positive (e.g. legitimate high-velocity buyer).
+                Mitigation policies are bypassed for this entity, and this data point is captured in the audit log for threshold tuning.
+              </p>
+            </div>
+          </div>
+        )}
+
         {isLoading ? (
           <div className="py-16 text-center space-y-3">
             <div className="w-6 h-6 border-2 border-sky-500 border-t-transparent rounded-full animate-spin mx-auto"></div>

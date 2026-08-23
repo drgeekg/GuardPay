@@ -39,6 +39,15 @@ export default function SimulatorControls({ onAttackComplete }) {
             ip_address: `103.21.58.${(i % 10) + 1}`,
             timestamp: now,
           };
+        } else if (type === 'high_velocity_buyer') {
+          // Concrete failure case: high frequency legitimate buyer (single IP, legitimate large amount)
+          txn = {
+            transaction_id: randId,
+            card_bin: '457173',
+            amount_paise: 2500000 + i * 50000, // ₹25,000+ legitimate ticket sizes
+            ip_address: '49.207.192.88', // Single genuine business buyer IP
+            timestamp: now,
+          };
         } else {
           const subnet = NORMAL_SUBNETS[i % NORMAL_SUBNETS.length];
           txn = {
@@ -95,7 +104,17 @@ export default function SimulatorControls({ onAttackComplete }) {
             className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-950/80 hover:bg-amber-900 border border-amber-800 text-amber-300 text-xs font-medium transition disabled:opacity-50"
           >
             <ShieldAlert className="w-3.5 h-3.5" />
-            <span>BIN Rotation Attack (15 txn)</span>
+            <span>BIN Rotation (15 txn)</span>
+          </button>
+
+          <button
+            onClick={() => runBurst('high_velocity_buyer')}
+            disabled={isRunning}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-800 text-indigo-300 text-xs font-medium transition disabled:opacity-50"
+            title="Simulate genuine high-frequency buyer (Commit 11: graceful failure case)"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+            <span>High-Velocity Buyer (15 txn)</span>
           </button>
 
           <button
@@ -104,7 +123,7 @@ export default function SimulatorControls({ onAttackComplete }) {
             className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium transition disabled:opacity-50"
           >
             <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Normal Traffic (10 txn)</span>
+            <span>Normal (10 txn)</span>
           </button>
         </div>
       </div>
