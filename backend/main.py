@@ -1,7 +1,8 @@
 """
 GuardPay — FastAPI backend entry point.
 
-Commit 3 scope: app boots, /health returns 200, /webhook/razorpay is a stub.
+Commit 3: app boots, /health, /webhook/razorpay stub.
+Commit 4: /transactions stub added so the attack simulator can POST to it.
 Full endpoint implementations land in commits 5-9 per docs/PLAN.md.
 """
 from fastapi import FastAPI, Request
@@ -36,6 +37,27 @@ def health():
     Used by the simulator and frontend to confirm the backend is up.
     """
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Ingestion — /transactions stub (velocity engine wired in commit 5)
+# ---------------------------------------------------------------------------
+
+@app.post("/transactions", tags=["ingestion"], status_code=202)
+async def ingest_transaction(request: Request):
+    """
+    Accepts a transaction event from the simulator or a Razorpay webhook.
+    Returns 202 Accepted immediately.
+
+    Stub: accepts and acknowledges the payload.
+    Commit 5 wires the velocity/clustering engine into this path.
+    Commit 6 wires alert generation.
+    """
+    payload = await request.json()
+    txn_id = payload.get("transaction_id", "unknown")
+    # TODO (commit 5): pass payload to velocity engine
+    # TODO (commit 6): check if engine raised an alert and persist it
+    return {"accepted": True, "transaction_id": txn_id}
 
 
 # ---------------------------------------------------------------------------
