@@ -84,6 +84,15 @@ flowchart LR
 | Audit Log | Append-only record of every action | Source of truth for "explainable" requirement |
 | Dashboard | Merchant-facing UI | Alert feed, dossier view, action buttons, audit trail |
 
+## Track 02 (AI Risk Manager) justification
+
+GuardPay directly addresses the core mandate of **Track 02 — AI Risk Manager**: transforming passive risk monitoring into an active, explainable, merchant-in-the-loop defense cockpit.
+
+1. **Meaningful Use of AI**: Rather than using an LLM as an un-auditable "black box" classifier on the hot payment path, GuardPay applies AI precisely where human cognition is bottlenecked — synthesizing dozens of distributed transaction metrics into a cohesive Incident Dossier, quantifying financial blast radius, explaining the threat model to a non-technical merchant, and recommending targeted mitigation.
+2. **Deterministic Risk Ingestion**: High-throughput payment processing requires sub-millisecond, reproducible anomaly detection. Velocity and clustering rules provide zero-latency detection without hallucination risks.
+3. **Explainable, Bounded, Gated Mitigations**: Merchants retain sovereign control over risk actions. Each mitigation (e.g. subnet block or 3DS step-up) clearly articulates its blast radius and duration, requires merchant confirmation, and records an immutable audit trail.
+4. **Resilience & Reversibility**: False positives are an inevitable reality of fraud mitigation. GuardPay ensures zero irreversible business damage through one-click mitigation rollbacks and logged merchant false-positive overrides.
+
 ## Key design decisions
 
 - **Why deterministic detection, not end-to-end LLM?** An LLM deciding

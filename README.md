@@ -1,6 +1,6 @@
 # GuardPay — AI Security & Fraud Desk for Merchants
 
-**Razorpay AI Buildathon 2026 — Open Track**
+**Razorpay AI Buildathon 2026 — Track 02 (AI Risk Manager)**
 
 A plug-and-play fraud triage dashboard. A merchant connects their Razorpay
 test-mode account, GuardPay watches the live transaction stream, flags
