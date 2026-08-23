@@ -6,18 +6,31 @@ Commit 4: /transactions stub added so the attack simulator can POST to it.
 Commit 5: velocity engine wired into /transactions.
 Commit 6: alert store wired in; GET /alerts and POST override live.
 Commit 8: LLM incident dossier generation wired into GET /alerts/{id}/dossier.
-Full endpoint implementations land in commit 9 per docs/PLAN.md.
+Commit 9: mitigation actions (block-subnet, enable-3ds, undo), audit log, and webhook receiver.
 """
+import hashlib
+import hmac
+import json
 import logging
-from typing import List
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.actions import action_executor
 from backend.alerts import alert_store
+from backend.audit import audit_store
 from backend.config import settings  # noqa: F401 — verifies env loads cleanly
 from backend.dossier import generate_dossier
-from backend.models import TransactionEventRequest, TransactionEventResponse
+from backend.models import (
+    ActionOut,
+    ActionRequest,
+    AuditLogEntryOut,
+    TransactionEventRequest,
+    TransactionEventResponse,
+)
 from backend.velocity import TransactionEvent, engine
 
 logger = logging.getLogger(__name__)
@@ -52,7 +65,7 @@ def health():
 
 
 # ---------------------------------------------------------------------------
-# Ingestion — /transactions  (velocity engine live as of commit 5)
+# Ingestion — /transactions
 # ---------------------------------------------------------------------------
 
 @app.post("/transactions", tags=["ingestion"], status_code=202,
@@ -61,11 +74,7 @@ async def ingest_transaction(req: TransactionEventRequest):
     """
     Accepts a transaction event from the simulator or Razorpay webhook.
     Passes it through the deterministic velocity engine and returns 202.
-
-    Detection path (commit 5): velocity engine evaluates all rules.
-    Alert persistence (commit 6): anomalies will be stored as Alert objects.
     """
-    # Convert API model → internal domain type
     txn = TransactionEvent(
         transaction_id=req.transaction_id,
         card_bin=req.card_bin,
@@ -109,7 +118,7 @@ def list_alerts() -> List[dict]:
 def get_dossier(alert_id: str) -> dict:
     """
     Returns the LLM-generated incident dossier for a given alert.
-    Generated lazily on first request, cached after (commit 8).
+    Generated lazily on first request, cached after.
     """
     alert = alert_store.get_by_id(alert_id)
     if alert is None:
@@ -118,34 +127,138 @@ def get_dossier(alert_id: str) -> dict:
 
 
 @app.post("/alerts/{alert_id}/override", tags=["alerts"])
-def override_alert(alert_id: str) -> dict:
+def override_alert(alert_id: str, actor: str = "merchant_user") -> dict:
     """
     Merchant marks an alert as a false positive.
-    Logged for the false-positive metric in docs/METRICS.md.
+    Logged in the audit trail for the false-positive metric in docs/METRICS.md.
     Does NOT delete the alert — it remains visible in the audit trail.
     """
-    ok = alert_store.mark_overridden(alert_id)
-    if not ok:
+    alert = alert_store.get_by_id(alert_id)
+    if alert is None:
         raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
-    return {"alert_id": alert_id, "overridden": True}
+    alert_store.mark_overridden(alert_id)
+    audit_entry = audit_store.record(
+        action_id=None,
+        alert_id=alert_id,
+        actor=actor,
+        action_type="override",
+        reason=f"Merchant marked alert {alert_id} ({alert.pattern_type}) as false positive",
+    )
+    return {"alert_id": alert_id, "overridden": True, "audit_log_id": audit_entry.audit_log_id}
 
 
 # ---------------------------------------------------------------------------
-# Webhook receiver — stub (wired up fully in commit 9)
+# Mitigation Actions
+# ---------------------------------------------------------------------------
+
+@app.post("/alerts/{alert_id}/actions/block-subnet", tags=["actions"], response_model=ActionOut)
+def block_subnet_action(alert_id: str, req: ActionRequest):
+    """
+    Blocks the affected subnet for 24h. Bounded, gated, reversible.
+    """
+    try:
+        action = action_executor.block_subnet(
+            alert_id=alert_id,
+            actor=req.actor,
+            reason_acknowledged=req.reason_acknowledged,
+        )
+        return ActionOut(
+            action_id=action.action_id,
+            effect=action.effect,
+            reversible_until=action.reversible_until,
+            audit_log_id=action.audit_log_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/alerts/{alert_id}/actions/enable-3ds", tags=["actions"], response_model=ActionOut)
+def enable_3ds_action(alert_id: str, req: ActionRequest):
+    """
+    Enables mandatory 3DS step-up for the affected BIN for 24h.
+    """
+    try:
+        action = action_executor.enable_3ds(
+            alert_id=alert_id,
+            actor=req.actor,
+            reason_acknowledged=req.reason_acknowledged,
+        )
+        return ActionOut(
+            action_id=action.action_id,
+            effect=action.effect,
+            reversible_until=action.reversible_until,
+            audit_log_id=action.audit_log_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/actions/{action_id}/undo", tags=["actions"])
+def undo_action_endpoint(action_id: str, req: Optional[dict] = None):
+    """
+    Reverses a previously executed mitigation action before expiration.
+    """
+    actor = (req or {}).get("actor", "merchant_admin") if req else "merchant_admin"
+    try:
+        return action_executor.undo_action(action_id=action_id, actor=actor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Audit Log
+# ---------------------------------------------------------------------------
+
+@app.get("/audit-log", tags=["audit-log"])
+def get_audit_log() -> List[dict]:
+    """
+    Returns every action ever taken (block, enable-3ds, undo, override), in order, with actor/reason/timestamp.
+    """
+    return [entry.to_dict() for entry in audit_store.get_all()]
+
+
+# ---------------------------------------------------------------------------
+# Webhook receiver — Razorpay test-mode webhook events
 # ---------------------------------------------------------------------------
 
 @app.post("/webhook/razorpay", tags=["ingestion"], status_code=200)
 async def razorpay_webhook(request: Request):
     """
     Receives Razorpay test-mode webhook events (payment.authorized,
-    payment.failed, etc.) and will normalize them into the internal
+    payment.failed, etc.) and normalizes them into the internal
     transaction event shape.
-
-    Stub only — signature verification and event normalization land in
-    commit 9.
     """
-    payload = await request.json()
+    body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    secret = settings.razorpay_key_secret.strip()
+    if signature and secret and not secret.startswith("YOUR_"):
+        expected_sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected_sig):
+            raise HTTPException(status_code=400, detail="Invalid webhook signature")
+
+    payload = json.loads(body.decode() or "{}") if body else {}
     event_type = payload.get("event", "unknown")
-    # TODO (commit 9): verify HMAC signature using settings.razorpay_key_secret
-    # TODO (commit 9): normalize into TransactionEvent and feed to velocity engine
+    payment = payload.get("payload", {}).get("payment", {}).get("entity", {})
+    if payment:
+        txn_id = payment.get("id", f"txn_{uuid.uuid4().hex[:8]}")
+        card = payment.get("card", {})
+        raw_bin = str(card.get("emi_sub_type") or card.get("network") or "411111")
+        card_bin = raw_bin[:6].ljust(6, "0")
+        amount = int(payment.get("amount", 0))
+        ip = payment.get("ip_address") or "127.0.0.1"
+        created_at_ts = payment.get("created_at")
+        txn_time = datetime.fromtimestamp(created_at_ts, tz=timezone.utc) if created_at_ts else datetime.now(timezone.utc)
+
+        txn = TransactionEvent(
+            transaction_id=txn_id,
+            card_bin=card_bin,
+            amount_paise=amount,
+            ip_address=ip,
+            timestamp=txn_time,
+        )
+        anomaly = engine.ingest(txn)
+        if anomaly:
+            alert_store.ingest_anomaly(anomaly)
+
     return {"received": True, "event": event_type}
+
