@@ -1,0 +1,16 @@
+# GuardPay backend dependencies
+# Pinned versions added progressively per PLAN.md commit order.
+
+# Commit 3 — backend scaffold
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-dotenv==1.0.1
+pydantic==2.8.2
+
+# Commit 5 — velocity engine (no extra deps; uses stdlib collections/datetime)
+
+# Commit 8 — LLM incident dossier
+anthropic==0.34.2
+
+# Commit 9 — Razorpay webhook verification
+razorpay==1.4.2
