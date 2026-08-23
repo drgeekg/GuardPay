@@ -127,7 +127,8 @@ docker-compose up --build
 # Open http://localhost:8000 in your browser
 ```
 
-### 1-Click Cloud Deployment (Render / Railway / Fly.io):
+### 1-Click Cloud Deployment (Render / Vercel / Railway / Fly.io):
+- **Full Guide:** See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for step-by-step instructions for Render, Vercel, Railway, Fly.io, and Docker.
 - **Render:** Connect GitHub repository, choose **Web Service** with Docker environment or import `render.yaml`.
 - **Port:** Set `PORT=8000`.
 
