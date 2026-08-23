@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: guardpay
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: CLAUDE_API_KEY
+        sync: false
