@@ -3,14 +3,17 @@ GuardPay — FastAPI backend entry point.
 
 Commit 3: app boots, /health, /webhook/razorpay stub.
 Commit 4: /transactions stub added so the attack simulator can POST to it.
-Commit 5: velocity engine wired into /transactions; alert store in commit 6.
-Full endpoint implementations land in commits 6-9 per docs/PLAN.md.
+Commit 5: velocity engine wired into /transactions.
+Commit 6: alert store wired in; GET /alerts and POST override live.
+Full endpoint implementations land in commits 8-9 per docs/PLAN.md.
 """
 import logging
+from typing import List
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.alerts import alert_store
 from backend.config import settings  # noqa: F401 — verifies env loads cleanly
 from backend.models import TransactionEventRequest, TransactionEventResponse
 from backend.velocity import TransactionEvent, engine
@@ -73,18 +76,71 @@ async def ingest_transaction(req: TransactionEventRequest):
     anomaly = engine.ingest(txn)
 
     if anomaly:
+        alert = alert_store.ingest_anomaly(anomaly)
         logger.warning(
-            "ANOMALY | pattern=%s severity=%s rule=%s bin=%s subnet=%s txn_count=%d",
+            "ALERT %s | pattern=%s severity=%s bin=%s subnet=%s txn_count=%d",
+            alert.alert_id,
             anomaly.pattern_type,
             anomaly.severity,
-            anomaly.rule_fired,
             anomaly.affected_bin,
             anomaly.affected_subnet,
             len(anomaly.transaction_ids),
         )
-        # TODO (commit 6): persist anomaly as an Alert object in the alert store
 
     return TransactionEventResponse(accepted=True, transaction_id=req.transaction_id)
+
+
+# ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+
+@app.get("/alerts", tags=["alerts"])
+def list_alerts() -> List[dict]:
+    """
+    Returns the live alert feed, most recent first.
+    Shape matches docs/API.md GET /alerts.
+    """
+    return [a.to_dict() for a in alert_store.get_all()]
+
+
+@app.get("/alerts/{alert_id}/dossier", tags=["alerts"])
+def get_dossier(alert_id: str) -> dict:
+    """
+    Returns the LLM-generated incident dossier for a given alert.
+    Generated lazily on first request, cached after (commit 8).
+
+    Stub: returns placeholder dossier until commit 8 wires the LLM agent.
+    """
+    alert = alert_store.get_by_id(alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    if alert.dossier:
+        return alert.dossier
+    # TODO (commit 8): call LLM agent to generate real dossier
+    n = len(alert.transaction_ids)
+    estimated_fee = n * 200  # rough placeholder: 200 paise processing fee per txn
+    return {
+        "alert_id": alert_id,
+        "root_cause": f"[Dossier pending — LLM agent wired in commit 8] "
+                      f"Pattern: {alert.pattern_type}, {n} transactions flagged.",
+        "estimated_fee_damage_paise": estimated_fee,
+        "blast_radius": f"{n} transactions, subnet {alert.affected_subnet}",
+        "confidence": alert.severity,
+        "summary": "Dossier generation (LLM) comes online in commit 8.",
+    }
+
+
+@app.post("/alerts/{alert_id}/override", tags=["alerts"])
+def override_alert(alert_id: str) -> dict:
+    """
+    Merchant marks an alert as a false positive.
+    Logged for the false-positive metric in docs/METRICS.md.
+    Does NOT delete the alert — it remains visible in the audit trail.
+    """
+    ok = alert_store.mark_overridden(alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+    return {"alert_id": alert_id, "overridden": True}
 
 
 # ---------------------------------------------------------------------------
