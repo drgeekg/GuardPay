@@ -3,12 +3,19 @@ GuardPay — FastAPI backend entry point.
 
 Commit 3: app boots, /health, /webhook/razorpay stub.
 Commit 4: /transactions stub added so the attack simulator can POST to it.
-Full endpoint implementations land in commits 5-9 per docs/PLAN.md.
+Commit 5: velocity engine wired into /transactions; alert store in commit 6.
+Full endpoint implementations land in commits 6-9 per docs/PLAN.md.
 """
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings  # noqa: F401 — verifies env loads cleanly
+from backend.models import TransactionEventRequest, TransactionEventResponse
+from backend.velocity import TransactionEvent, engine
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="GuardPay",
@@ -40,24 +47,44 @@ def health():
 
 
 # ---------------------------------------------------------------------------
-# Ingestion — /transactions stub (velocity engine wired in commit 5)
+# Ingestion — /transactions  (velocity engine live as of commit 5)
 # ---------------------------------------------------------------------------
 
-@app.post("/transactions", tags=["ingestion"], status_code=202)
-async def ingest_transaction(request: Request):
+@app.post("/transactions", tags=["ingestion"], status_code=202,
+          response_model=TransactionEventResponse)
+async def ingest_transaction(req: TransactionEventRequest):
     """
-    Accepts a transaction event from the simulator or a Razorpay webhook.
-    Returns 202 Accepted immediately.
+    Accepts a transaction event from the simulator or Razorpay webhook.
+    Passes it through the deterministic velocity engine and returns 202.
 
-    Stub: accepts and acknowledges the payload.
-    Commit 5 wires the velocity/clustering engine into this path.
-    Commit 6 wires alert generation.
+    Detection path (commit 5): velocity engine evaluates all rules.
+    Alert persistence (commit 6): anomalies will be stored as Alert objects.
     """
-    payload = await request.json()
-    txn_id = payload.get("transaction_id", "unknown")
-    # TODO (commit 5): pass payload to velocity engine
-    # TODO (commit 6): check if engine raised an alert and persist it
-    return {"accepted": True, "transaction_id": txn_id}
+    # Convert API model → internal domain type
+    txn = TransactionEvent(
+        transaction_id=req.transaction_id,
+        card_bin=req.card_bin,
+        amount_paise=req.amount_paise,
+        ip_address=req.ip_address,
+        timestamp=req.timestamp,
+    )
+
+    # Detection — deterministic, no LLM (docs/DESIGN.md constraint)
+    anomaly = engine.ingest(txn)
+
+    if anomaly:
+        logger.warning(
+            "ANOMALY | pattern=%s severity=%s rule=%s bin=%s subnet=%s txn_count=%d",
+            anomaly.pattern_type,
+            anomaly.severity,
+            anomaly.rule_fired,
+            anomaly.affected_bin,
+            anomaly.affected_subnet,
+            len(anomaly.transaction_ids),
+        )
+        # TODO (commit 6): persist anomaly as an Alert object in the alert store
+
+    return TransactionEventResponse(accepted=True, transaction_id=req.transaction_id)
 
 
 # ---------------------------------------------------------------------------
