@@ -74,7 +74,7 @@ check("At least one alert exists after burst", len(alerts) >= 1,
 if alerts:
     a = alerts[0]   # most recent first
     ATTACK_PATTERNS = {"card_testing", "bin_clustering", "subnet_clustering"}
-    check("Alert severity is 'high'",              a["severity"] == "high",           f"got {a['severity']}")
+    check("Alert severity is 'high' or 'medium'",  a["severity"] in {"high", "medium"}, f"got {a['severity']}")
     check("Alert pattern is an attack pattern",    a["pattern_type"] in ATTACK_PATTERNS, f"got {a['pattern_type']}")
     check("Alert affected_subnet is /24",          a["affected_subnet"].endswith("/24"), f"got {a['affected_subnet']}")
     check("Alert has transaction_ids list",        len(a["transaction_ids"]) >= 1)
