@@ -12,6 +12,8 @@ pydantic==2.8.2
 
 # Commit 8 — LLM incident dossier
 anthropic==0.34.2
+# openai SDK reused for NVIDIA NIM (OpenAI-compatible endpoint) — no NVIDIA-specific package needed
+openai>=1.40.0
 
 # Commit 9 — Razorpay webhook verification
 razorpay==1.4.2

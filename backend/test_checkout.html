@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GuardPay — Razorpay Test Mode Checkout</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+<body class="bg-[#0b1120] text-slate-100 min-h-screen flex flex-col items-center justify-center p-4">
+  <div class="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
+    <div class="text-center space-y-2">
+      <div class="inline-flex items-center justify-center p-3 bg-sky-500/10 rounded-full border border-sky-500/20 text-sky-400 mb-2">
+        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+        </svg>
+      </div>
+      <h1 class="text-xl font-bold text-slate-100">GuardPay Test Checkout</h1>
+      <p class="text-xs text-slate-400">Trigger real Razorpay Test-Mode transactions to test live webhook ingestion and AI fraud triage.</p>
+    </div>
+
+    <div class="bg-slate-950/60 rounded-xl p-4 border border-slate-800 space-y-3">
+      <div class="flex justify-between items-center text-sm">
+        <span class="text-slate-400">Merchant Account</span>
+        <span id="key-label" class="font-mono text-sky-400 text-xs">Connecting...</span>
+      </div>
+      <div class="flex justify-between items-center text-sm">
+        <span class="text-slate-400">Test Item</span>
+        <span class="font-medium text-slate-200">Security Sandbox License</span>
+      </div>
+      <div class="flex justify-between items-center text-sm">
+        <span class="text-slate-400">Amount</span>
+        <span class="font-semibold text-emerald-400 text-base">₹5.00</span>
+      </div>
+    </div>
+
+    <div class="space-y-3">
+      <button id="pay-btn" onclick="triggerPayment()" class="w-full py-3 px-4 bg-sky-600 hover:bg-sky-500 text-white font-medium rounded-xl transition shadow-lg shadow-sky-900/30 flex items-center justify-center space-x-2">
+        <span>Pay ₹5.00 via Razorpay Test Checkout</span>
+      </button>
+      <div id="status-box" class="hidden p-3 rounded-lg text-xs"></div>
+    </div>
+
+    <div class="border-t border-slate-800/80 pt-4 text-xs text-slate-500 space-y-2">
+      <div class="font-semibold text-slate-400">Razorpay Test Cards:</div>
+      <div class="font-mono text-[11px] bg-slate-950 p-2 rounded border border-slate-800/60 text-slate-300">
+        Card: 4111 1111 1111 1111<br/>
+        Expiry: 12/28 | CVV: 123 | OTP: 123456
+      </div>
+      <p class="text-[11px]">When webhook is connected, this transaction automatically triggers GuardPay's velocity engine and AI incident dossier.</p>
+    </div>
+  </div>
+
+  <script>
+    async function triggerPayment() {
+      const btn = document.getElementById('pay-btn');
+      const statusBox = document.getElementById('status-box');
+      btn.disabled = true;
+      btn.innerHTML = '<span>Creating Razorpay Order...</span>';
+
+      try {
+        const res = await fetch('/api/razorpay/create-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount_paise: 500 })
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || 'Failed to create order');
+        }
+
+        const data = await res.json();
+        document.getElementById('key-label').innerText = data.key_id;
+
+        const options = {
+          key: data.key_id,
+          amount: data.amount,
+          currency: data.currency,
+          name: "GuardPay Demo Merchant",
+          description: "Razorpay Test Transaction",
+          order_id: data.order_id,
+          handler: function (response) {
+            statusBox.className = "p-3 rounded-lg text-xs bg-emerald-950/80 border border-emerald-800 text-emerald-300";
+            statusBox.innerHTML = `<strong>Payment Authorized!</strong><br/>Payment ID: ${response.razorpay_payment_id}<br/>Razorpay webhook will now notify GuardPay.`;
+            statusBox.classList.remove('hidden');
+            btn.disabled = false;
+            btn.innerHTML = '<span>Pay Again (₹5.00)</span>';
+          },
+          prefill: {
+            name: "Test Customer",
+            email: "test.customer@guardpay.local",
+            contact: "9999999999"
+          },
+          theme: {
+            color: "#0284c7"
+          }
+        };
+
+        const rzp = new Razorpay(options);
+        rzp.on('payment.failed', function (response) {
+          statusBox.className = "p-3 rounded-lg text-xs bg-rose-950/80 border border-rose-800 text-rose-300";
+          statusBox.innerHTML = `<strong>Payment Failed:</strong> ${response.error.description}`;
+          statusBox.classList.remove('hidden');
+          btn.disabled = false;
+          btn.innerHTML = '<span>Retry Payment</span>';
+        });
+
+        rzp.open();
+      } catch (err) {
+        statusBox.className = "p-3 rounded-lg text-xs bg-rose-950/80 border border-rose-800 text-rose-300";
+        statusBox.innerHTML = `<strong>Error:</strong> ${err.message}`;
+        statusBox.classList.remove('hidden');
+        btn.disabled = false;
+        btn.innerHTML = '<span>Pay ₹5.00 via Razorpay Test Checkout</span>';
+      }
+    }
+
+    fetch('/api/razorpay/create-order', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        if (d.key_id) document.getElementById('key-label').innerText = d.key_id;
+      })
+      .catch(() => {});
+  </script>
+</body>
+</html>

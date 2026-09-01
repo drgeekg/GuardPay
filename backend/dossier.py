@@ -100,19 +100,12 @@ def _synthesize_deterministic_dossier(alert: Alert) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# LLM Generation via Anthropic Claude API
+# Shared prompt builder
 # ---------------------------------------------------------------------------
 
-def _generate_claude_dossier(alert: Alert) -> Dict[str, Any]:
-    """
-    Calls Anthropic Claude API to generate an explainable incident dossier.
-    """
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=settings.claude_api_key)
-
+def _build_prompt(alert: Alert) -> str:
     txn_count = len(alert.transaction_ids)
-    prompt = f"""You are the AI Risk Manager for GuardPay, an AI fraud triage system for Razorpay merchants.
+    return f"""You are the AI Risk Manager for GuardPay, an AI fraud triage system for Razorpay merchants.
 A deterministic velocity rule has flagged an anomaly. Your job is to synthesize an Incident Dossier explaining the event clearly to a non-technical merchant.
 
 Alert Details:
@@ -135,55 +128,196 @@ Respond ONLY with a valid JSON object matching this schema:
   "summary": "<2-3 sentence plain-language explanation and recommendation for a merchant>"
 }}"""
 
-    response = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=600,
-        temperature=0.2,
-        messages=[{"role": "user", "content": prompt}],
-    )
 
-    content_text = response.content[0].text.strip()
-    # Strip markdown fences if present
-    if content_text.startswith("```json"):
-        content_text = content_text[7:]
-    if content_text.startswith("```"):
-        content_text = content_text[3:]
-    if content_text.endswith("```"):
-        content_text = content_text[:-3]
-    content_text = content_text.strip()
-
-    parsed = json.loads(content_text)
-    # Ensure all required fields exist
+def _parse_llm_json(content_text: str, alert: Alert) -> Dict[str, Any]:
+    """Strip markdown fences and parse JSON from an LLM response."""
+    text = content_text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+    parsed = json.loads(text)
     parsed["alert_id"] = alert.alert_id
-    parsed["estimated_fee_damage_paise"] = int(parsed.get("estimated_fee_damage_paise", txn_count * 450))
+    parsed["estimated_fee_damage_paise"] = int(
+        parsed.get("estimated_fee_damage_paise", len(alert.transaction_ids) * 450)
+    )
     return parsed
 
 
 # ---------------------------------------------------------------------------
-# Public Dossier Generator
+# LLM Generation — Provider 1: Anthropic Claude
+# ---------------------------------------------------------------------------
+
+def _generate_claude_dossier(alert: Alert) -> Dict[str, Any]:
+    """
+    Calls Anthropic Claude API to generate an explainable incident dossier.
+    """
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=settings.claude_api_key)
+    response = client.messages.create(
+        model=settings.claude_model,
+        max_tokens=600,
+        temperature=0.2,
+        messages=[{"role": "user", "content": _build_prompt(alert)}],
+    )
+    return _parse_llm_json(response.content[0].text, alert)
+
+
+# ---------------------------------------------------------------------------
+# LLM Generation — Provider 2: NVIDIA NIM (OpenAI-compatible API)
+# ---------------------------------------------------------------------------
+
+def _generate_nvidia_dossier(alert: Alert) -> Dict[str, Any]:
+    """
+    Calls NVIDIA NIM's OpenAI-compatible endpoint to generate a dossier.
+    Get a free API key at https://build.nvidia.com/
+    """
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url=settings.nvidia_base_url,
+        api_key=settings.nvidia_api_key,
+    )
+    response = client.chat.completions.create(
+        model=settings.nvidia_model,
+        max_tokens=600,
+        temperature=0.2,
+        messages=[{"role": "user", "content": _build_prompt(alert)}],
+    )
+    return _parse_llm_json(response.choices[0].message.content, alert)
+
+
+# ---------------------------------------------------------------------------
+# LLM Generation — Provider 3: Cloud Ollama / Remote LLM (with API key & custom URL)
+# ---------------------------------------------------------------------------
+
+def _generate_ollama_cloud_dossier(alert: Alert) -> Dict[str, Any]:
+    """
+    Calls a cloud-hosted Ollama, OpenWebUI, or remote OpenAI-compatible endpoint with an API key.
+    Configure OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_API_KEY, and OLLAMA_CLOUD_MODEL in .env.
+    """
+    import httpx
+
+    base_url = settings.ollama_cloud_base_url.rstrip("/")
+    headers = {"Content-Type": "application/json"}
+    if settings.ollama_cloud_api_key:
+        headers["Authorization"] = f"Bearer {settings.ollama_cloud_api_key}"
+
+    # Try Ollama native /api/chat endpoint first (if base_url is not specifically /v1)
+    if not base_url.endswith("/v1"):
+        try:
+            payload = {
+                "model": settings.ollama_cloud_model,
+                "messages": [{"role": "user", "content": _build_prompt(alert)}],
+                "stream": False,
+            }
+            resp = httpx.post(f"{base_url}/api/chat", json=payload, headers=headers, timeout=60.0)
+            if resp.status_code == 200:
+                content = resp.json().get("message", {}).get("content", "")
+                if content:
+                    return _parse_llm_json(content, alert)
+        except Exception:
+            pass  # Try OpenAI-compatible endpoint fallback below
+
+    # OpenAI-compatible /v1/chat/completions endpoint fallback
+    openai_url = f"{base_url}/chat/completions" if base_url.endswith("/v1") else f"{base_url}/v1/chat/completions"
+    payload = {
+        "model": settings.ollama_cloud_model,
+        "messages": [{"role": "user", "content": _build_prompt(alert)}],
+        "temperature": 0.2,
+        "max_tokens": 600,
+    }
+    resp = httpx.post(openai_url, json=payload, headers=headers, timeout=60.0)
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    return _parse_llm_json(content, alert)
+
+
+# ---------------------------------------------------------------------------
+# LLM Generation — Provider 4: Local Ollama (localhost)
+# ---------------------------------------------------------------------------
+
+def _generate_ollama_dossier(alert: Alert) -> Dict[str, Any]:
+    """
+    Calls a local Ollama instance via its REST API.
+    Configure OLLAMA_BASE_URL and OLLAMA_MODEL in .env.
+    Default: http://localhost:11434 with model llama3.
+    """
+    import httpx
+
+    payload = {
+        "model": settings.ollama_model,
+        "messages": [{"role": "user", "content": _build_prompt(alert)}],
+        "stream": False,
+    }
+    resp = httpx.post(
+        f"{settings.ollama_base_url.rstrip('/')}/api/chat",
+        json=payload,
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    content = resp.json()["message"]["content"]
+    return _parse_llm_json(content, alert)
+
+
+# ---------------------------------------------------------------------------
+# Public Dossier Generator — auto-fallback chain
 # ---------------------------------------------------------------------------
 
 def generate_dossier(alert: Alert) -> Dict[str, Any]:
     """
     Generates and returns an incident dossier for the given alert.
     If already generated, returns the cached version.
+
+    Provider priority (first available & successful wins):
+      1. Anthropic Claude      — if CLAUDE_API_KEY is configured
+      2. NVIDIA NIM            — if NVIDIA_API_KEY is configured
+      3. Cloud Ollama / Remote — if OLLAMA_CLOUD_BASE_URL is configured
+      4. Local Ollama          — attempted on OLLAMA_BASE_URL (default http://localhost:11434)
+      5. Deterministic         — rule-based domain template, always available
     """
     if alert.dossier:
         return alert.dossier
 
     dossier: Dict[str, Any]
 
-    # Check if a real Anthropic key is configured
-    key = settings.claude_api_key.strip() if settings.claude_api_key else ""
-    if key and not key.startswith("sk-ant-YOUR"):
-        try:
-            logger.info("Calling Claude API to generate dossier for %s", alert.alert_id)
-            dossier = _generate_claude_dossier(alert)
-        except Exception as exc:
-            logger.warning("Claude API dossier generation failed: %s; using deterministic fallback", exc)
-            dossier = _synthesize_deterministic_dossier(alert)
-    else:
-        dossier = _synthesize_deterministic_dossier(alert)
+    # Build the ordered list of providers to try
+    providers = []
 
+    claude_key = (settings.claude_api_key or "").strip()
+    if claude_key and not claude_key.startswith("sk-ant-YOUR"):
+        providers.append(("Claude", _generate_claude_dossier))
+
+    nvidia_key = (settings.nvidia_api_key or "").strip()
+    if nvidia_key and not nvidia_key.startswith("nvapi-YOUR"):
+        providers.append(("NVIDIA NIM", _generate_nvidia_dossier))
+
+    cloud_ollama_url = (settings.ollama_cloud_base_url or "").strip()
+    if cloud_ollama_url and not cloud_ollama_url.startswith("YOUR_"):
+        providers.append(("Cloud Ollama", _generate_ollama_cloud_dossier))
+
+    # Local Ollama is always included in the attempt chain
+    providers.append(("Local Ollama", _generate_ollama_dossier))
+
+    for provider_name, generator in providers:
+        try:
+            logger.info("Calling %s to generate dossier for %s", provider_name, alert.alert_id)
+            dossier = generator(alert)
+            logger.info("%s dossier generation succeeded for %s", provider_name, alert.alert_id)
+            alert.dossier = dossier
+            return dossier
+        except Exception as exc:
+            logger.warning(
+                "%s dossier generation failed: %s — trying next provider", provider_name, exc
+            )
+
+    logger.info("All LLM providers failed; using deterministic fallback for %s", alert.alert_id)
+    dossier = _synthesize_deterministic_dossier(alert)
     alert.dossier = dossier
     return dossier
+

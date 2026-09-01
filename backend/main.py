@@ -45,10 +45,10 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Allow the React dev server (commit 10) to call the backend without CORS errors.
+# Allow React dev server and public tunnel domains (ngrok, localtunnel, etc.)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -222,36 +222,53 @@ def get_audit_log() -> List[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Webhook receiver — Razorpay test-mode webhook events
+# Razorpay Integration — Webhook receiver & Order creation
 # ---------------------------------------------------------------------------
 
 @app.post("/webhook/razorpay", tags=["ingestion"], status_code=200)
 async def razorpay_webhook(request: Request):
     """
     Receives Razorpay test-mode webhook events (payment.authorized,
-    payment.failed, etc.) and normalizes them into the internal
-    transaction event shape.
+    payment.failed, payment.captured, etc.) and normalizes them into
+    the internal transaction event shape.
     """
     body = await request.body()
     signature = request.headers.get("X-Razorpay-Signature", "")
-    secret = settings.razorpay_key_secret.strip()
+    secret = (settings.razorpay_webhook_secret or settings.razorpay_key_secret or "").strip()
+
     if signature and secret and not secret.startswith("YOUR_"):
         expected_sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected_sig):
+            logger.warning("Webhook signature mismatch: received %s", signature)
             raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
     payload = json.loads(body.decode() or "{}") if body else {}
     event_type = payload.get("event", "unknown")
+    logger.info("Razorpay webhook received | event=%s", event_type)
+
     payment = payload.get("payload", {}).get("payment", {}).get("entity", {})
     if payment:
         txn_id = payment.get("id", f"txn_{uuid.uuid4().hex[:8]}")
         card = payment.get("card", {})
-        raw_bin = str(card.get("emi_sub_type") or card.get("network") or "411111")
-        card_bin = raw_bin[:6].ljust(6, "0")
+
+        raw_bin = "411111"
+        if isinstance(card, dict):
+            raw_bin = str(card.get("bin") or card.get("emi_sub_type") or card.get("network") or "411111")
+        elif isinstance(card, str) and card:
+            raw_bin = card[:6]
+
+        digits_only = "".join(filter(str.isdigit, raw_bin))
+        card_bin = digits_only[:6].ljust(6, "0") if digits_only else "411111"
+
         amount = int(payment.get("amount", 0))
-        ip = payment.get("ip_address") or "127.0.0.1"
+        notes = payment.get("notes", {})
+        ip = notes.get("ip_address") or payment.get("ip_address") or "127.0.0.1"
         created_at_ts = payment.get("created_at")
-        txn_time = datetime.fromtimestamp(created_at_ts, tz=timezone.utc) if created_at_ts else datetime.now(timezone.utc)
+        txn_time = (
+            datetime.fromtimestamp(created_at_ts, tz=timezone.utc)
+            if created_at_ts
+            else datetime.now(timezone.utc)
+        )
 
         txn = TransactionEvent(
             transaction_id=txn_id,
@@ -262,9 +279,58 @@ async def razorpay_webhook(request: Request):
         )
         anomaly = engine.ingest(txn)
         if anomaly:
-            alert_store.ingest_anomaly(anomaly)
+            alert = alert_store.ingest_anomaly(anomaly)
+            logger.warning(
+                "ALERT %s | pattern=%s severity=%s bin=%s subnet=%s txn_count=%d",
+                alert.alert_id,
+                anomaly.pattern_type,
+                anomaly.severity,
+                anomaly.affected_bin,
+                anomaly.affected_subnet,
+                len(anomaly.transaction_ids),
+            )
 
     return {"received": True, "event": event_type}
+
+
+@app.post("/api/razorpay/create-order", tags=["ingestion"])
+async def create_razorpay_order(req: Optional[dict] = None):
+    """
+    Creates a real Razorpay Test-Mode Order using configured credentials.
+    """
+    import razorpay
+
+    key_id = settings.razorpay_key_id.strip()
+    key_secret = settings.razorpay_key_secret.strip()
+
+    if not key_id or not key_secret or key_id.startswith("rzp_test_YOUR"):
+        raise HTTPException(
+            status_code=400,
+            detail="Razorpay credentials (RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET) not set in .env"
+        )
+
+    amount = (req or {}).get("amount_paise", 50000)  # Default: ₹500
+    currency = (req or {}).get("currency", "INR")
+    receipt = (req or {}).get("receipt", f"rcpt_{uuid.uuid4().hex[:6]}")
+    notes = (req or {}).get("notes", {"ip_address": "103.21.58.42"})
+
+    try:
+        client = razorpay.Client(auth=(key_id, key_secret))
+        order = client.order.create({
+            "amount": amount,
+            "currency": currency,
+            "receipt": receipt,
+            "notes": notes,
+        })
+        return {
+            "order_id": order.get("id"),
+            "amount": order.get("amount"),
+            "currency": order.get("currency"),
+            "key_id": key_id,
+        }
+    except Exception as exc:
+        logger.exception("Failed to create Razorpay order")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +351,14 @@ def get_metrics_summary():
         "recall": 1.0,
         "false_positive_cost_estimate_paise": 170000,
     }
+
+
+@app.get("/test-checkout", include_in_schema=False)
+async def serve_test_checkout():
+    html_path = os.path.join(os.path.dirname(__file__), "test_checkout.html")
+    if os.path.exists(html_path):
+        return FileResponse(html_path)
+    raise HTTPException(status_code=404, detail="Test checkout page not found")
 
 
 # ---------------------------------------------------------------------------
