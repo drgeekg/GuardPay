@@ -17,3 +17,4 @@ openai>=1.40.0
 
 # Commit 9 — Razorpay webhook verification
 razorpay==1.4.2
+setuptools>=65.0.0

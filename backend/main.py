@@ -301,8 +301,6 @@ async def create_razorpay_order(req: Optional[dict] = None):
     """
     Creates a real Razorpay Test-Mode Order using configured credentials.
     """
-    import razorpay
-
     key_id = settings.razorpay_key_id.strip()
     key_secret = settings.razorpay_key_secret.strip()
 
@@ -318,19 +316,34 @@ async def create_razorpay_order(req: Optional[dict] = None):
     notes = (req or {}).get("notes", {"ip_address": "103.21.58.42"})
 
     try:
-        client = razorpay.Client(auth=(key_id, key_secret))
-        order = client.order.create({
-            "amount": amount,
-            "currency": currency,
-            "receipt": receipt,
-            "notes": notes,
-        })
+        import httpx
+
+        resp = httpx.post(
+            "https://api.razorpay.com/v1/orders",
+            auth=(key_id, key_secret),
+            json={
+                "amount": amount,
+                "currency": currency,
+                "receipt": receipt,
+                "notes": notes,
+            },
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            logger.error("Razorpay API error: %s %s", resp.status_code, resp.text)
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail=f"Razorpay API error: {resp.text}"
+            )
+        order = resp.json()
         return {
             "order_id": order.get("id"),
             "amount": order.get("amount"),
             "currency": order.get("currency"),
             "key_id": key_id,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to create Razorpay order")
         raise HTTPException(status_code=500, detail=str(exc))
