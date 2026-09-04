@@ -60,6 +60,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 @app.get("/health", tags=["health"])
+@app.get("/healthz", tags=["health"])
 def health():
     """
     Returns 200 {"status": "ok"}.
@@ -226,6 +227,8 @@ def get_audit_log() -> List[dict]:
 # ---------------------------------------------------------------------------
 
 @app.post("/webhook/razorpay", tags=["ingestion"], status_code=200)
+@app.post("/webhook", tags=["ingestion"], status_code=200)
+@app.post("/api/webhook", tags=["ingestion"], status_code=200)
 async def razorpay_webhook(request: Request):
     """
     Receives Razorpay test-mode webhook events (payment.authorized,
